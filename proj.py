@@ -7,6 +7,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 model_name = "speakleash/Bielik-4.5B-v3.0-Instruct" 
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import pickle
 
 tokenizer = AutoTokenizer.from_pretrained(
     model_name,
@@ -31,20 +32,20 @@ except Exception as e:
 
 model.eval() 
 
+DATA_DIR = "data/"
+CHUNK_SIZE_WORDS = 500 
+CHUNK_OVERLAP_WORDS = 30 
+BATCH_SIZE_EMBED = 8    
+MAX_TOKENS_PER_CHUNK = 512
 
-sentences_pl = [
-    "Jak stworzyć lokalne embeddingi używając polskiego LLM BIELIK?",
-    "Sztuczna inteligencja rewolucjonizuje sposób, w jaki pracujemy.",
-    "Polska ma bogatą historię i kulturę.",
-    "Model BIELIK został opracowany przez Allegro."
-]
+all_chunk_texts = []
+all_chunk_embeddings = []
 
 
 def get_decoder_only_embeddings(texts, tokenizer, model, pooling_strategy="mean"):
     inputs = tokenizer(
         texts,
         padding=True,
-        truncation=True,
         return_tensors="pt"
     ).to(model.device if hasattr(model, 'device') else "cpu") # model.device if not using device_map fully
 
@@ -67,9 +68,56 @@ def get_decoder_only_embeddings(texts, tokenizer, model, pooling_strategy="mean"
 
     return sentence_embeddings.cpu().numpy()
 
-print("Generating embeddings...")
-embeddings_llm = get_decoder_only_embeddings(sentences_pl, tokenizer, model, pooling_strategy="mean")
+source_texts = ["balladyna.txt","kordian.txt","pan-tadeusz.txt","dziady-dziady-poema-dziady-czesc-iii.txt"]
 
 
-print(f"Shape of LLM embeddings (mean pooling): {embeddings_llm.shape}")
-print("First LLM embedding vector (mean pooling, first 5 dimensions):", embeddings_llm[0][:5])
+def do_everything():
+    for source_text in source_texts:
+        with open(os.path.join(DATA_DIR, source_text), "r", encoding="utf-8") as f:
+            text = f.read()
+
+
+        words = text.split()
+        chunks = []
+        i = 0
+        while i < len(words):
+            chunk = words[i:i + CHUNK_SIZE_WORDS]
+            chunks.append(" ".join(chunk))
+            if i + CHUNK_SIZE_WORDS >= len(words):
+                break
+            i += CHUNK_SIZE_WORDS - CHUNK_OVERLAP_WORDS
+
+        sentences_pl = chunks
+
+
+
+
+        print("Generating embeddings...")
+        for chunk in sentences_pl:
+            vector = []
+            embeddings_llm = get_decoder_only_embeddings(chunk, tokenizer, model, pooling_strategy="mean")
+            vector.append(embeddings_llm)
+
+        vector_db = []
+        vector_db.append(vector)
+
+
+        with open(os.path.join(DATA_DIR, f"vector_db_{source_text}.pkl"), "wb") as f:
+            pickle.dump(vector_db, f)
+
+
+#do_everything()
+def load_embeddings():
+    all_chunk_texts = []
+    all_chunk_embeddings = []
+
+    for source_text in source_texts:
+        with open(os.path.join(DATA_DIR, f"vector_db_{source_text}.pkl"), "rb") as f:
+            vector_db = pickle.load(f)
+            for vector in vector_db:
+                all_chunk_embeddings.append(vector)
+
+    return all_chunk_embeddings
+
+all_chunk_embeddings = load_embeddings()
+print(all_chunk_embeddings)
