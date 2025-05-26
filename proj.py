@@ -34,22 +34,26 @@ OLLAMA_MODEL_NAME = "mwiewior/bielik"
 #OLLAMA_MODEL_NAME = "antoniprzybylik/llama-pllum:8b"
 
 
-DATA_DIR = "data/"
+DATA_DIR = "data/raw_data"
 CHUNK_SIZE_WORDS = 500
 CHUNK_OVERLAP_WORDS = 30
 QDRANT_BATCH_SIZE = 64
 QDRANT_COLLECTION_NAME = "literary_embeddings"
 
-source_texts = ["balladyna.txt","kordian.txt","pan-tadeusz.txt","dziady-dziady-poema-dziady-czesc-iii.txt"]
 
+source_texts = []
+for root, dirs, files in os.walk(DATA_DIR):
+    for file in files:
+        if file.endswith(".txt"):
+            # Store as (relative_path_from_DATA_DIR, child_folder_name)
+            rel_path = os.path.relpath(os.path.join(root, file), DATA_DIR)
+            # Get the immediate child folder name (if any)
+            author_folder = os.path.relpath(root, DATA_DIR).split(os.sep)[0] if os.path.relpath(root, DATA_DIR) != '.' else ''
+            source_texts.append((rel_path, author_folder, file))
 
 VECTOR_DIMENSION = None
 
 def check_ollama_status_and_get_dim(model_to_check: str):
-    """
-    Checks Ollama server, model availability, and determines vector dimension.
-    Updates the global VECTOR_DIMENSION.
-    """
     global VECTOR_DIMENSION
     print(f"Checking Ollama status at {OLLAMA_API_BASE_URL} for model '{model_to_check}'...")
     try:
@@ -94,7 +98,6 @@ def check_ollama_status_and_get_dim(model_to_check: str):
 
 
 def get_ollama_embeddings(text: str, model_name: str, api_url: str) -> np.ndarray | None:
-    """Generates embeddings, returns numpy array (1, D) or None on error."""
     try:
         payload = {"model": model_name, "prompt": text}
         response = requests.post(api_url, json=payload, timeout=60)
@@ -113,19 +116,14 @@ def get_ollama_embeddings(text: str, model_name: str, api_url: str) -> np.ndarra
 
 
 def setup_qdrant_collection(client: QdrantClient, collection_name: str, vector_dim: int, recreate_if_needed: bool = False):
-    """Creates or verifies Qdrant collection."""
     print(f"Setting up Qdrant collection '{collection_name}' with vector dimension {vector_dim}...")
     try:
         collection_info = client.get_collection(collection_name=collection_name)
         print(f"Collection '{collection_name}' already exists.")
-        # Check if existing collection's vector size matches the current model's embedding dimension
-        # This assumes a single vector config. If multiple named vectors, logic is more complex.
         existing_vector_size = None
         if isinstance(collection_info.config.params.vectors, models.VectorParams):
             existing_vector_size = collection_info.config.params.vectors.size
         elif isinstance(collection_info.config.params.vectors, dict): # Named vectors
-            # Assuming you're using the default unnamed vector or a specific one
-            # For simplicity, let's assume default vector or first one if named
             if "" in collection_info.config.params.vectors: # Default unnamed vector
                  existing_vector_size = collection_info.config.params.vectors[""].size
             elif collection_info.config.params.vectors: # First named vector
@@ -166,10 +164,6 @@ def setup_qdrant_collection(client: QdrantClient, collection_name: str, vector_d
 
 
 def do_everything(current_ollama_model_name: str):
-    """
-    Processes files, generates embeddings using the specified Ollama model,
-    and upserts them to Qdrant Cloud with the model name in the payload.
-    """
     if not QDRANT_CLOUD_URL or not QDRANT_API_KEY:
         print("Error: QDRANT_CLOUD_URL and QDRANT_API_KEY environment variables must be set.")
         exit(1)
@@ -183,15 +177,11 @@ def do_everything(current_ollama_model_name: str):
     print(f"Initializing Qdrant client for URL: {QDRANT_CLOUD_URL[:40]}...")
     qdrant_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
 
-    # Setup Qdrant collection. Consider if you want to recreate it if dimensions mismatch.
-    # For this example, set recreate_if_needed=False to be safe.
-    # If True, it will DELETE and RECREATE the collection if dimensions don't match.
-    # USE `recreate_if_needed=True` WITH CAUTION.
     setup_qdrant_collection(qdrant_client, QDRANT_COLLECTION_NAME, VECTOR_DIMENSION, recreate_if_needed=False)
 
     total_points_upserted_session = 0
 
-    for source_text_filename in source_texts:
+    for source_text_filename, author_folder, file_name in source_texts:
         filepath = os.path.join(DATA_DIR, source_text_filename)
         if not os.path.exists(filepath):
             print(f"Warning: Source text file not found: {filepath}. Skipping.")
@@ -227,10 +217,11 @@ def do_everything(current_ollama_model_name: str):
                     id=point_id,
                     vector=embedding_vector_1d,
                     payload={
-                        "source_file": source_text_filename,
+                        "source_file": file_name,
                         "chunk_text": chunk_text,
                         "chunk_index": idx,
-                        "model_name": current_ollama_model_name # <-- ADDED MODEL NAME HERE
+                        "model_name": current_ollama_model_name,
+                        "author": author_folder # <-- ADDED MODEL NAME HERE
                     }
                 )
                 points_batch.append(point)
@@ -269,10 +260,7 @@ def search_similar_embeddings(user_query: str,
                               collection_name: str,
                               ollama_model_for_query: str,
                               top_k: int = 5):
-    """
-    Embeds a user query, searches Qdrant for similar embeddings from a specific model,
-    and returns the results.
-    """
+
     print(f"\nSearching for text similar to: \"{user_query[:100]}...\"")
     print(f"Using Ollama model '{ollama_model_for_query}' for query embedding.")
     print(f"Filtering results in Qdrant collection '{collection_name}' for payload.model_name = '{ollama_model_for_query}'.")
@@ -312,7 +300,6 @@ def search_similar_embeddings(user_query: str,
         return []
     
 def cosine_similarity_np(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    """Computes cosine similarity between two 1D numpy arrays."""
     if vec1.ndim > 1: vec1 = vec1.flatten()
     if vec2.ndim > 1: vec2 = vec2.flatten()
     dot_product = np.dot(vec1, vec2)
@@ -322,7 +309,6 @@ def cosine_similarity_np(vec1: np.ndarray, vec2: np.ndarray) -> float:
     return dot_product / (norm_vec1 * norm_vec2)
 
 def normalize_vector_np(vec: np.ndarray) -> np.ndarray:
-    """Normalizes a 1D numpy array (L2 norm)."""
     if vec.ndim > 1: vec = vec.flatten()
     norm = np.linalg.norm(vec)
     if norm == 0: return vec
@@ -337,9 +323,6 @@ def search_average_similarity_per_file(
     top_n_files: int = 3,
     normalize_chunks_before_averaging: bool = True
 ) -> List[Tuple[str, float, int]]: # Returns (source_file, similarity_score, num_chunks)
-    """
-    Calculates average vector of chunks per source_file and then similarity to user_query.
-    """
     print(f"\nSearching FILES (by averaged chunks) similar to: \"{user_query[:100].strip()}...\"")
     print(f"Using Ollama model '{ollama_model_name}' for query and filtering stored chunks.")
     if normalize_chunks_before_averaging:
@@ -360,13 +343,10 @@ def search_average_similarity_per_file(
     scroll_filter_conditions = [
         FieldCondition(key="model_name", match=MatchValue(value=ollama_model_name))
     ]
-    # Optional: If you only want to average over specific source files, add another filter:
-    # scroll_filter_conditions.append(
-    #     FieldCondition(key="source_file", match=MatchAny(any=["file1.txt", "file2.txt"]))
-    # )
+
     
     current_offset = None
-    scroll_limit = 250 # How many points to fetch per scroll request
+    scroll_limit = 250 
 
     try:
         while True:
@@ -429,17 +409,13 @@ def search_average_similarity_per_file(
         stacked_vectors = np.array(vectors_list) # Shape: (num_chunks, vector_dimension)
         
         if normalize_chunks_before_averaging:
-            # Normalize each row (chunk vector)
             norms = np.linalg.norm(stacked_vectors, axis=1, keepdims=True)
-            # Avoid division by zero for zero vectors
-            norms[norms == 0] = 1e-9 # or handle zero vectors differently if they shouldn't contribute
+            norms[norms == 0] = 1e-9 
             normalized_stacked_vectors = stacked_vectors / norms
             avg_vector = np.mean(normalized_stacked_vectors, axis=0)
         else:
             avg_vector = np.mean(stacked_vectors, axis=0)
         
-        # Optionally, normalize the final averaged vector too
-        # avg_vector = normalize_vector_np(avg_vector)
 
         averaged_embeddings_per_file[source_file] = (avg_vector, len(vectors_list))
         print(f"  Averaged {len(vectors_list)} chunks for '{source_file}'. Avg vector shape: {avg_vector.shape}")
@@ -463,14 +439,14 @@ def search_average_similarity_per_file(
 # --- Main execution logic ---
 if __name__ == "__main__":
 
-    # # --- Run the process with the chosen OLLAMA_MODEL_NAME ---
-    # print(f"Starting embedding generation and upload to Qdrant Cloud using model: {OLLAMA_MODEL_NAME}")
-    # print("Ensure OLLAMA_MODEL_NAME, QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
-    # print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
+    # --- Run the process with the chosen OLLAMA_MODEL_NAME ---
+    print(f"Starting embedding generation and upload to Qdrant Cloud using model: {OLLAMA_MODEL_NAME}")
+    print("Ensure OLLAMA_MODEL_NAME, QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
+    print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
 
-    # do_everything(current_ollama_model_name=OLLAMA_MODEL_NAME)
+    do_everything(current_ollama_model_name=OLLAMA_MODEL_NAME)
 
-    # print("\nProcessing complete.")
+    print("\nProcessing complete.")
 
     print(f"Initializing Qdrant client for search (URL: {QDRANT_CLOUD_URL[:40]}...).")
     try:
@@ -484,48 +460,54 @@ if __name__ == "__main__":
         exit(1)
 
 
-    user_input_query = "Kto to jest Alina? "
+    # user_input_query = "Kto to jest Alina? "
 
     
-    if user_input_query.strip():
-        # --- 1. Chunk-level search ---
-        chunk_results = search_similar_embeddings(
-            user_query=user_input_query,
-            qdrant_client=q_client,
-            collection_name=QDRANT_COLLECTION_NAME,
-            ollama_model_for_query=OLLAMA_MODEL_NAME, # Use the globally defined model
-            top_k=3
-        )
-        if chunk_results:
-            print(f"\n--- Top {len(chunk_results)} SIMILAR CHUNKS for model '{OLLAMA_MODEL_NAME}' ---")
-            for i, hit in enumerate(chunk_results): # hit is ScoredPoint
-                print(f"\nChunk Result {i+1}:")
-                print(f"  ID: {hit.id}, Score: {hit.score:.4f}")
-                if hit.payload:
-                    print(f"  Source File: {hit.payload.get('source_file', 'N/A')}")
-                    print(f"  Model Stored: {hit.payload.get('model_name', 'N/A')}")
-                    chunk_text = hit.payload.get('chunk_text', '')
-                    print(f"  Text: \"{chunk_text[:150].strip()}...\"")
-        else:
-            print("No similar chunks found or an error occurred during chunk search.")
+    # if user_input_query.strip():
+    #     # --- 1. Chunk-level search ---
+    #     chunk_results = search_similar_embeddings(
+    #         user_query=user_input_query,
+    #         qdrant_client=q_client,
+    #         collection_name=QDRANT_COLLECTION_NAME,
+    #         ollama_model_for_query=OLLAMA_MODEL_NAME, # Use the globally defined model
+    #         top_k=3
+    #     )
+    #     if chunk_results:
+    #         print(f"\n--- Top {len(chunk_results)} SIMILAR CHUNKS for model '{OLLAMA_MODEL_NAME}' ---")
+    #         for i, hit in enumerate(chunk_results): # hit is ScoredPoint
+    #             print(f"\nChunk Result {i+1}:")
+    #             print(f"  ID: {hit.id}, Score: {hit.score:.4f}")
+    #             if hit.payload:
+    #                 print(f"  Source File: {hit.payload.get('source_file', 'N/A')}")
+    #                 print(f"  Model Stored: {hit.payload.get('model_name', 'N/A')}")
+    #                 chunk_text = hit.payload.get('chunk_text', '')
+    #                 print(f"  Text: \"{chunk_text[:150].strip()}...\"")
+    #     else:
+    #         print("No similar chunks found or an error occurred during chunk search.")
 
-        # --- 2. File-level search (averaged chunks) ---
-        file_results_avg = search_average_similarity_per_file(
-            user_query=user_input_query,
-            qdrant_client=q_client,
-            collection_name=QDRANT_COLLECTION_NAME,
-            ollama_model_name=OLLAMA_MODEL_NAME, # Use the globally defined model
-            top_n_files=3,
-            normalize_chunks_before_averaging=True
-        )
-        if file_results_avg:
-            print(f"\n--- Top {len(file_results_avg)} SIMILAR FILES (by averaged chunks) for model '{OLLAMA_MODEL_NAME}' ---")
-            for i, (filename, score, num_chunks) in enumerate(file_results_avg):
-                print(f"\nFile Result {i+1}:")
-                print(f"  Source File: {filename}")
-                print(f"  Avg. Similarity Score: {score:.4f}")
-                print(f"  (Based on {num_chunks} chunks)")
-        else:
-            print("No similar files found by averaging or an error occurred.")
-    else:
-        print("No query entered. Exiting.")
+    #     # --- 2. File-level search (averaged chunks) ---
+    #     file_results_avg = search_average_similarity_per_file(
+    #         user_query=user_input_query,
+    #         qdrant_client=q_client,
+    #         collection_name=QDRANT_COLLECTION_NAME,
+    #         ollama_model_name=OLLAMA_MODEL_NAME, # Use the globally defined model
+    #         top_n_files=3,
+    #         normalize_chunks_before_averaging=True
+    #     )
+    #     if file_results_avg:
+    #         print(f"\n--- Top {len(file_results_avg)} SIMILAR FILES (by averaged chunks) for model '{OLLAMA_MODEL_NAME}' ---")
+    #         for i, (filename, score, num_chunks) in enumerate(file_results_avg):
+    #             print(f"\nFile Result {i+1}:")
+    #             print(f"  Source File: {filename}")
+    #             print(f"  Avg. Similarity Score: {score:.4f}")
+    #             print(f"  (Based on {num_chunks} chunks)")
+    #     else:
+    #         print("No similar files found by averaging or an error occurred.")
+    # else:
+    #     print("No query entered. Exiting.")
+
+
+    ## Delete the collection if needed (uncomment to use)
+    # qdrant_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
+    # qdrant_client.delete_collection(collection_name=QDRANT_COLLECTION_NAME)
+
