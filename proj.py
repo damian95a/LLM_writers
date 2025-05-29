@@ -5,6 +5,8 @@ import pickle
 import json 
 import uuid
 import dotenv
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 dotenv.load_dotenv()
 
 from typing import List, Dict, Tuple
@@ -14,9 +16,7 @@ from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
 try:
     from qdrant_client.http.models import ScrollRequest, ScrollResponse
 except ImportError:
-    # Older versions might have ScrollRequest in models or handle scroll differently.
-    # For this example, we'll assume the client has a .scroll() method that works.
-    # If .scroll() itself is an issue, we might need to use repeated .search() with offsets.
+
     class ScrollRequest: pass # Placeholder
     class ScrollResponse: # Placeholder
         def __init__(self, points, next_page_offset):
@@ -30,8 +30,8 @@ QDRANT_CLOUD_URL = os.getenv("QDRANT_CLOUD_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") 
 
 #OLLAMA_MODEL_NAME = "mistral" 
-OLLAMA_MODEL_NAME = "mwiewior/bielik"
-#OLLAMA_MODEL_NAME = "antoniprzybylik/llama-pllum:8b"
+#OLLAMA_MODEL_NAME = "mwiewior/bielik"
+OLLAMA_MODEL_NAME = "antoniprzybylik/llama-pllum:8b"
 
 
 DATA_DIR = "data/raw_data"
@@ -278,7 +278,7 @@ def search_similar_embeddings(user_query: str,
     query_filter = Filter(
         must=[
             FieldCondition(
-                key="model_name",  # <-- poprawka: klucz payloadu, nie nazwa modelu!
+                key="model_name", 
                 match=MatchValue(value=ollama_model_for_query)
             )
         ]
@@ -436,28 +436,333 @@ def search_average_similarity_per_file(
     file_similarity_scores.sort(key=lambda item: item[1], reverse=True)
 
     return file_similarity_scores[:top_n_files]
+
+
+
+
+def fetch_all_embeddings_for_tsne(qdrant_client: QdrantClient, collection_name: str, model_name: str, max_points: int = 1000):
+    embeddings = []
+    labels = []
+    scroll_filter_conditions = [
+        FieldCondition(key="model_name", match=MatchValue(value=model_name))
+    ]
+    current_offset = None
+    scroll_limit = 250
+    total = 0
+
+    while total < max_points:
+        points, next_page_offset = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=scroll_filter_conditions),
+            limit=min(scroll_limit, max_points - total),
+            offset=current_offset,
+            with_payload=["source_file"],
+            with_vectors=True
+        )
+        if not points:
+            break
+        for point in points:
+            vector_data = point.vector
+            if isinstance(vector_data, dict):
+                vec = np.array(vector_data.get("", []), dtype=np.float32)
+            else:
+                vec = np.array(vector_data, dtype=np.float32)
+            if vec.size == 0:
+                continue
+            embeddings.append(vec)
+            labels.append(point.payload.get("source_file", "unknown"))
+            total += 1
+            if total >= max_points:
+                break
+        current_offset = next_page_offset
+        if current_offset is None:
+            break
+    return np.array(embeddings), labels
+
+def plot_tsne_of_embeddings(qdrant_client: QdrantClient, collection_name: str, model_name: str, max_points: int = 1000):
+    print(f"Pobieranie embeddingów do t-SNE (max {max_points})...")
+    X, labels = fetch_all_embeddings_for_tsne(qdrant_client, collection_name, model_name, max_points)
+    if X.shape[0] == 0:
+        print("Brak embeddingów do wizualizacji.")
+        return
+    print(f"Redukcja wymiarów t-SNE ({X.shape[0]} punktów)...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    X_2d = tsne.fit_transform(X)
+
+    # Przypisz kolor do każdego unikalnego source_file
+    unique_labels = list(sorted(set(labels)))
+    color_map = {label: idx for idx, label in enumerate(unique_labels)}
+    colors = [color_map[label] for label in labels]
+
+    plt.figure(figsize=(12, 9))
+    scatter = plt.scatter(X_2d[:, 0], X_2d[:, 1], c=colors, cmap='tab20', alpha=0.7)
+
+    # Dodaj legendę z nazwami plików
+    handles = []
+    for label, idx in color_map.items():
+        handles.append(plt.Line2D([], [], marker="o", color='w', markerfacecolor=plt.cm.tab20(idx / max(1, len(unique_labels)-1)), label=label, markersize=8))
+    plt.legend(handles=handles, title="source_file", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+
+    # Opcjonalnie: wyświetl etykiety plików dla pierwszych N punktów
+    for i in range(min(30, len(labels))):
+        plt.annotate(labels[i], (X_2d[i, 0], X_2d[i, 1]), fontsize=8, alpha=0.7)
+    plt.title(f"t-SNE embeddingów z Qdrant ({model_name})")
+    plt.xlabel("t-SNE 1")
+    plt.ylabel("t-SNE 2")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_tsne_by_author(qdrant_client: QdrantClient, collection_name: str, model_name: str, max_points: int = 1000):
+    print(f"Pobieranie embeddingów do t-SNE (max {max_points})...")
+    embeddings = []
+    authors = []
+    scroll_filter_conditions = [
+        FieldCondition(key="model_name", match=MatchValue(value=model_name))
+    ]
+    current_offset = None
+    scroll_limit = 250
+    total = 0
+
+    while total < max_points:
+        points, next_page_offset = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=scroll_filter_conditions),
+            limit=min(scroll_limit, max_points - total),
+            offset=current_offset,
+            with_payload=["author"],
+            with_vectors=True
+        )
+        if not points:
+            break
+        for point in points:
+            vector_data = point.vector
+            if isinstance(vector_data, dict):
+                vec = np.array(vector_data.get("", []), dtype=np.float32)
+            else:
+                vec = np.array(vector_data, dtype=np.float32)
+            if vec.size == 0:
+                continue
+            embeddings.append(vec)
+            authors.append(point.payload.get("author", "unknown"))
+            total += 1
+            if total >= max_points:
+                break
+        current_offset = next_page_offset
+        if current_offset is None:
+            break
+
+    X = np.array(embeddings)
+    if X.shape[0] == 0:
+        print("Brak embeddingów do wizualizacji.")
+        return
+
+    print(f"Redukcja wymiarów t-SNE ({X.shape[0]} punktów)...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    X_2d = tsne.fit_transform(X)
+
+    # Przypisz kolor do każdego unikalnego autora
+    unique_authors = list(sorted(set(authors)))
+    color_map = {author: idx for idx, author in enumerate(unique_authors)}
+    colors = [color_map[author] for author in authors]
+
+    plt.figure(figsize=(12, 9))
+    scatter = plt.scatter(X_2d[:, 0], X_2d[:, 1], c=colors, cmap='tab20', alpha=0.7)
+
+    # Dodaj legendę z nazwami autorów
+    handles = []
+    for author, idx in color_map.items():
+        handles.append(plt.Line2D([], [], marker="o", color='w', markerfacecolor=plt.cm.tab20(idx / max(1, len(unique_authors)-1)), label=author, markersize=8))
+    plt.legend(handles=handles, title="author", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+
+    # Opcjonalnie: wyświetl etykiety autorów dla pierwszych N punktów
+    for i in range(min(30, len(authors))):
+        plt.annotate(authors[i], (X_2d[i, 0], X_2d[i, 1]), fontsize=8, alpha=0.7)
+    plt.title(f"t-SNE embeddingów z Qdrant ({model_name}) wg autora")
+    plt.xlabel("t-SNE 1")
+    plt.ylabel("t-SNE 2")
+    plt.tight_layout()
+    plt.show()
+
+def plot_tsne_of_authors_avg(qdrant_client: QdrantClient, collection_name: str, model_name: str, max_points: int = 1000):
+    """
+    Średnia embeddingów dla każdego autora i wizualizacja t-SNE (każdy punkt to autor).
+    """
+    print(f"Pobieranie embeddingów do t-SNE (max {max_points})...")
+    # 1. Pobierz embeddingi i autorów
+    author_vectors: Dict[str, list] = {}
+    scroll_filter_conditions = [
+        FieldCondition(key="model_name", match=MatchValue(value=model_name))
+    ]
+    current_offset = None
+    scroll_limit = 250
+    total = 0
+
+    while total < max_points:
+        points, next_page_offset = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=scroll_filter_conditions),
+            limit=min(scroll_limit, max_points - total),
+            offset=current_offset,
+            with_payload=["author"],
+            with_vectors=True
+        )
+        if not points:
+            break
+        for point in points:
+            vector_data = point.vector
+            if isinstance(vector_data, dict):
+                vec = np.array(vector_data.get("", []), dtype=np.float32)
+            else:
+                vec = np.array(vector_data, dtype=np.float32)
+            if vec.size == 0:
+                continue
+            author = point.payload.get("author", "unknown")
+            if author not in author_vectors:
+                author_vectors[author] = []
+            author_vectors[author].append(vec)
+            total += 1
+            if total >= max_points:
+                break
+        current_offset = next_page_offset
+        if current_offset is None:
+            break
+
+    # 2. Oblicz średnie embeddingi dla każdego autora
+    avg_embeddings = []
+    author_labels = []
+    for author, vectors in author_vectors.items():
+        stacked = np.stack(vectors)
+        avg_vec = np.mean(stacked, axis=0)
+        avg_embeddings.append(avg_vec)
+        author_labels.append(author)
+
+    X = np.array(avg_embeddings)
+    if X.shape[0] == 0:
+        print("Brak embeddingów do wizualizacji.")
+        return
+
+    print(f"Redukcja wymiarów t-SNE ({X.shape[0]} autorów)...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, X.shape[0]-1))
+    X_2d = tsne.fit_transform(X)
+
+    # Kolory dla autorów
+    unique_authors = list(sorted(set(author_labels)))
+    color_map = {author: idx for idx, author in enumerate(unique_authors)}
+    colors = [color_map[author] for author in author_labels]
+
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(X_2d[:, 0], X_2d[:, 1], c=colors, cmap='tab20', alpha=0.8, s=120)
+
+    # Legenda
+    handles = []
+    for author, idx in color_map.items():
+        handles.append(plt.Line2D([], [], marker="o", color='w', markerfacecolor=plt.cm.tab20(idx / max(1, len(unique_authors)-1)), label=author, markersize=10))
+    plt.legend(handles=handles, title="author", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+
+    # Etykiety autorów
+    for i, author in enumerate(author_labels):
+        plt.annotate(author, (X_2d[i, 0], X_2d[i, 1]), fontsize=10, alpha=0.8)
+    plt.title(f"t-SNE średnich embeddingów autorów ({model_name})")
+    plt.xlabel("t-SNE 1")
+    plt.ylabel("t-SNE 2")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_tsne_by_author_allowed(qdrant_client: QdrantClient, collection_name: str, model_name: str, max_points: int = 1000):
+    print(f"Pobieranie embeddingów do t-SNE (max {max_points})...")
+    embeddings = []
+    authors = []
+    allowed_authors = {"sienkiewicz_henryk", "słowacki_juliusz"} 
+    scroll_filter_conditions = [
+        FieldCondition(key="model_name", match=MatchValue(value=model_name))
+    ]
+    current_offset = None
+    scroll_limit = 250
+    total = 0
+
+    while total < max_points:
+        points, next_page_offset = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=scroll_filter_conditions),
+            limit=min(scroll_limit, max_points - total),
+            offset=current_offset,
+            with_payload=["author"],
+            with_vectors=True
+        )
+        if not points:
+            break
+        for point in points:
+            author = point.payload.get("author", "unknown")
+            if author not in allowed_authors:
+                continue  
+            vector_data = point.vector
+            if isinstance(vector_data, dict):
+                vec = np.array(vector_data.get("", []), dtype=np.float32)
+            else:
+                vec = np.array(vector_data, dtype=np.float32)
+            if vec.size == 0:
+                continue
+            embeddings.append(vec)
+            authors.append(author)
+            total += 1
+            if total >= max_points:
+                break
+        current_offset = next_page_offset
+        if current_offset is None:
+            break
+
+    X = np.array(embeddings)
+    if X.shape[0] == 0:
+        print("Brak embeddingów do wizualizacji.")
+        return
+
+    print(f"Redukcja wymiarów t-SNE ({X.shape[0]} punktów)...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    X_2d = tsne.fit_transform(X)
+
+    unique_authors = list(sorted(set(authors)))
+    color_map = {author: idx for idx, author in enumerate(unique_authors)}
+    colors = [color_map[author] for author in authors]
+
+    plt.figure(figsize=(12, 9))
+    scatter = plt.scatter(X_2d[:, 0], X_2d[:, 1], c=colors, cmap='tab20', alpha=0.7)
+
+    handles = []
+    for author, idx in color_map.items():
+        handles.append(plt.Line2D([], [], marker="o", color='w', markerfacecolor=plt.cm.tab20(idx / max(1, len(unique_authors)-1)), label=author, markersize=8))
+    plt.legend(handles=handles, title="author", bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+
+    for i in range(min(30, len(authors))):
+        plt.annotate(authors[i], (X_2d[i, 0], X_2d[i, 1]), fontsize=8, alpha=0.7)
+    plt.title(f"t-SNE embeddingów z Qdrant ({model_name}) wg autora (tylko Sienkiewicz i Słowacki)")
+    plt.xlabel("t-SNE 1")
+    plt.ylabel("t-SNE 2")
+    plt.tight_layout()
+    plt.show()
 # --- Main execution logic ---
 if __name__ == "__main__":
 
-    # --- Run the process with the chosen OLLAMA_MODEL_NAME ---
-    print(f"Starting embedding generation and upload to Qdrant Cloud using model: {OLLAMA_MODEL_NAME}")
-    print("Ensure OLLAMA_MODEL_NAME, QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
-    print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
+    # #--- Run the process with the chosen OLLAMA_MODEL_NAME ---
+    # print(f"Starting embedding generation and upload to Qdrant Cloud using model: {OLLAMA_MODEL_NAME}")
+    # print("Ensure OLLAMA_MODEL_NAME, QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
+    # print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
 
-    do_everything(current_ollama_model_name=OLLAMA_MODEL_NAME)
+    # do_everything(current_ollama_model_name=OLLAMA_MODEL_NAME)
 
-    print("\nProcessing complete.")
+    # print("\nProcessing complete.")
 
-    print(f"Initializing Qdrant client for search (URL: {QDRANT_CLOUD_URL[:40]}...).")
-    try:
-        q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
-        # Verify collection exists (optional, but good practice)
-        q_client.get_collection(collection_name=QDRANT_COLLECTION_NAME)
-        print(f"Successfully connected to Qdrant and collection '{QDRANT_COLLECTION_NAME}' is accessible.")
-    except Exception as e:
-        print(f"Failed to initialize Qdrant client or access collection '{QDRANT_COLLECTION_NAME}': {e}")
-        print("Please ensure Qdrant is running, accessible, and the collection exists with the correct embeddings.")
-        exit(1)
+    # print(f"Initializing Qdrant client for search (URL: {QDRANT_CLOUD_URL[:40]}...).")
+    # try:
+    #     q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
+    #     # Verify collection exists (optional, but good practice)
+    #     q_client.get_collection(collection_name=QDRANT_COLLECTION_NAME)
+    #     print(f"Successfully connected to Qdrant and collection '{QDRANT_COLLECTION_NAME}' is accessible.")
+    # except Exception as e:
+    #     print(f"Failed to initialize Qdrant client or access collection '{QDRANT_COLLECTION_NAME}': {e}")
+    #     print("Please ensure Qdrant is running, accessible, and the collection exists with the correct embeddings.")
+    #     exit(1)
 
 
     # user_input_query = "Kto to jest Alina? "
@@ -465,11 +770,12 @@ if __name__ == "__main__":
     
     # if user_input_query.strip():
     #     # --- 1. Chunk-level search ---
+    #     q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
     #     chunk_results = search_similar_embeddings(
     #         user_query=user_input_query,
     #         qdrant_client=q_client,
     #         collection_name=QDRANT_COLLECTION_NAME,
-    #         ollama_model_for_query=OLLAMA_MODEL_NAME, # Use the globally defined model
+    #         ollama_model_for_query=OLLAMA_MODEL_NAME,
     #         top_k=3
     #     )
     #     if chunk_results:
@@ -490,7 +796,7 @@ if __name__ == "__main__":
     #         user_query=user_input_query,
     #         qdrant_client=q_client,
     #         collection_name=QDRANT_COLLECTION_NAME,
-    #         ollama_model_name=OLLAMA_MODEL_NAME, # Use the globally defined model
+    #         ollama_model_name=OLLAMA_MODEL_NAME, 
     #         top_n_files=3,
     #         normalize_chunks_before_averaging=True
     #     )
@@ -505,9 +811,14 @@ if __name__ == "__main__":
     #         print("No similar files found by averaging or an error occurred.")
     # else:
     #     print("No query entered. Exiting.")
-
-
-    ## Delete the collection if needed (uncomment to use)
-    # qdrant_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
-    # qdrant_client.delete_collection(collection_name=QDRANT_COLLECTION_NAME)
-
+    q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
+    #plot_tsne_of_embeddings(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=5000)
+    #plot_tsne_by_author(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=500)
+    #plot_tsne_of_authors_avg(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=500)  
+    plot_tsne_by_author_allowed(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=500) 
+#     qdrant_client.create_payload_index(
+#     collection_name=QDRANT_COLLECTION_NAME,
+#     field_name="model_name",
+#     field_schema="keyword"
+# )
+ 
