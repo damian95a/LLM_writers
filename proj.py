@@ -1,6 +1,7 @@
 import requests
 import numpy as np
 import os
+import sys
 import pickle
 import json 
 import uuid
@@ -27,11 +28,7 @@ OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBED_API_URL = f"{OLLAMA_API_BASE_URL}/api/embeddings"
 
 QDRANT_CLOUD_URL = os.getenv("QDRANT_CLOUD_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") 
-
-#OLLAMA_MODEL_NAME = "mistral" 
-#OLLAMA_MODEL_NAME = "mwiewior/bielik"
-OLLAMA_MODEL_NAME = "antoniprzybylik/llama-pllum:8b"
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 
 DATA_DIR = "data/raw_data"
@@ -97,7 +94,7 @@ def check_ollama_status_and_get_dim(model_to_check: str):
     print("-" * 30)
 
 
-def get_ollama_embeddings(text: str, model_name: str, api_url: str) -> np.ndarray | None:
+def get_ollama_embeddings(text: str, model_name: str, api_url: str):# -> np.ndarray | None:
     try:
         payload = {"model": model_name, "prompt": text}
         response = requests.post(api_url, json=payload, timeout=60)
@@ -115,7 +112,7 @@ def get_ollama_embeddings(text: str, model_name: str, api_url: str) -> np.ndarra
         return None
 
 
-def setup_qdrant_collection(client: QdrantClient, collection_name: str, vector_dim: int, recreate_if_needed: bool = False):
+def setup_qdrant_collection(client: QdrantClient, collection_name: str, vector_dim: int, current_ollama_model_name: str, recreate_if_needed: bool = False):
     print(f"Setting up Qdrant collection '{collection_name}' with vector dimension {vector_dim}...")
     try:
         collection_info = client.get_collection(collection_name=collection_name)
@@ -132,7 +129,7 @@ def setup_qdrant_collection(client: QdrantClient, collection_name: str, vector_d
 
         if existing_vector_size and existing_vector_size != vector_dim:
             print(f"CRITICAL MISMATCH: Collection '{collection_name}' exists with vector size {existing_vector_size}, "
-                  f"but current model '{OLLAMA_MODEL_NAME}' produces embeddings of size {vector_dim}.")
+                  f"but current model '{current_ollama_model_name}' produces embeddings of size {vector_dim}.")
             if recreate_if_needed:
                 print(f"Recreating collection '{collection_name}' with new dimension {vector_dim}.")
                 client.delete_collection(collection_name=collection_name)
@@ -177,7 +174,7 @@ def do_everything(current_ollama_model_name: str):
     print(f"Initializing Qdrant client for URL: {QDRANT_CLOUD_URL[:40]}...")
     qdrant_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
 
-    setup_qdrant_collection(qdrant_client, QDRANT_COLLECTION_NAME, VECTOR_DIMENSION, recreate_if_needed=False)
+    setup_qdrant_collection(qdrant_client, QDRANT_COLLECTION_NAME, VECTOR_DIMENSION, current_ollama_model_name, recreate_if_needed=False)
 
     total_points_upserted_session = 0
 
@@ -741,84 +738,123 @@ def plot_tsne_by_author_allowed(qdrant_client: QdrantClient, collection_name: st
     plt.ylabel("t-SNE 2")
     plt.tight_layout()
     plt.show()
-# --- Main execution logic ---
-if __name__ == "__main__":
-
-    # #--- Run the process with the chosen OLLAMA_MODEL_NAME ---
-    # print(f"Starting embedding generation and upload to Qdrant Cloud using model: {OLLAMA_MODEL_NAME}")
-    # print("Ensure OLLAMA_MODEL_NAME, QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
-    # print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
-
-    # do_everything(current_ollama_model_name=OLLAMA_MODEL_NAME)
-
-    # print("\nProcessing complete.")
-
-    # print(f"Initializing Qdrant client for search (URL: {QDRANT_CLOUD_URL[:40]}...).")
-    # try:
-    #     q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
-    #     # Verify collection exists (optional, but good practice)
-    #     q_client.get_collection(collection_name=QDRANT_COLLECTION_NAME)
-    #     print(f"Successfully connected to Qdrant and collection '{QDRANT_COLLECTION_NAME}' is accessible.")
-    # except Exception as e:
-    #     print(f"Failed to initialize Qdrant client or access collection '{QDRANT_COLLECTION_NAME}': {e}")
-    #     print("Please ensure Qdrant is running, accessible, and the collection exists with the correct embeddings.")
-    #     exit(1)
 
 
-    # user_input_query = "Kto to jest Alina? "
 
-    
-    # if user_input_query.strip():
-    #     # --- 1. Chunk-level search ---
-    #     q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
-    #     chunk_results = search_similar_embeddings(
-    #         user_query=user_input_query,
-    #         qdrant_client=q_client,
-    #         collection_name=QDRANT_COLLECTION_NAME,
-    #         ollama_model_for_query=OLLAMA_MODEL_NAME,
-    #         top_k=3
-    #     )
-    #     if chunk_results:
-    #         print(f"\n--- Top {len(chunk_results)} SIMILAR CHUNKS for model '{OLLAMA_MODEL_NAME}' ---")
-    #         for i, hit in enumerate(chunk_results): # hit is ScoredPoint
-    #             print(f"\nChunk Result {i+1}:")
-    #             print(f"  ID: {hit.id}, Score: {hit.score:.4f}")
-    #             if hit.payload:
-    #                 print(f"  Source File: {hit.payload.get('source_file', 'N/A')}")
-    #                 print(f"  Model Stored: {hit.payload.get('model_name', 'N/A')}")
-    #                 chunk_text = hit.payload.get('chunk_text', '')
-    #                 print(f"  Text: \"{chunk_text[:150].strip()}...\"")
-    #     else:
-    #         print("No similar chunks found or an error occurred during chunk search.")
+def process_texts(ollama_model):
+    #--- Run the process with the chosen OLLAMA_MODEL_NAME ---
+    print(f"Starting embedding generation and upload to Qdrant Cloud using model: {ollama_model}")
+    print("Ensure QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
+    print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
 
-    #     # --- 2. File-level search (averaged chunks) ---
-    #     file_results_avg = search_average_similarity_per_file(
-    #         user_query=user_input_query,
-    #         qdrant_client=q_client,
-    #         collection_name=QDRANT_COLLECTION_NAME,
-    #         ollama_model_name=OLLAMA_MODEL_NAME, 
-    #         top_n_files=3,
-    #         normalize_chunks_before_averaging=True
-    #     )
-    #     if file_results_avg:
-    #         print(f"\n--- Top {len(file_results_avg)} SIMILAR FILES (by averaged chunks) for model '{OLLAMA_MODEL_NAME}' ---")
-    #         for i, (filename, score, num_chunks) in enumerate(file_results_avg):
-    #             print(f"\nFile Result {i+1}:")
-    #             print(f"  Source File: {filename}")
-    #             print(f"  Avg. Similarity Score: {score:.4f}")
-    #             print(f"  (Based on {num_chunks} chunks)")
-    #     else:
-    #         print("No similar files found by averaging or an error occurred.")
-    # else:
-    #     print("No query entered. Exiting.")
+    do_everything(current_ollama_model_name=ollama_model)
+
+    print("\nProcessing complete.")
+
+    print(f"Initializing Qdrant client for search (URL: {QDRANT_CLOUD_URL[:40]}...).")
+    try:
+        q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
+        # Verify collection exists (optional, but good practice)
+        q_client.get_collection(collection_name=QDRANT_COLLECTION_NAME)
+        print(f"Successfully connected to Qdrant and collection '{QDRANT_COLLECTION_NAME}' is accessible.")
+    except Exception as e:
+        print(f"Failed to initialize Qdrant client or access collection '{QDRANT_COLLECTION_NAME}': {e}")
+        print("Please ensure Qdrant is running, accessible, and the collection exists with the correct embeddings.")
+        exit(1)
+
+def process_query(user_input_query, ollama_model):
+    if user_input_query.strip():
+        # --- 1. Chunk-level search ---
+        q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
+        chunk_results = search_similar_embeddings(
+            user_query=user_input_query,
+            qdrant_client=q_client,
+            collection_name=QDRANT_COLLECTION_NAME,
+            ollama_model_for_query=ollama_model,
+            top_k=3
+        )
+        if chunk_results:
+            print(f"\n--- Top {len(chunk_results)} SIMILAR CHUNKS for model '{ollama_model}' ---")
+            for i, hit in enumerate(chunk_results): # hit is ScoredPoint
+                print(f"\nChunk Result {i+1}:")
+                print(f"  ID: {hit.id}, Score: {hit.score:.4f}")
+                if hit.payload:
+                    print(f"  Source File: {hit.payload.get('source_file', 'N/A')}")
+                    print(f"  Model Stored: {hit.payload.get('model_name', 'N/A')}")
+                    chunk_text = hit.payload.get('chunk_text', '')
+                    print(f"  Text: \"{chunk_text[:150].strip()}...\"")
+        else:
+            print("No similar chunks found or an error occurred during chunk search.")
+
+        # --- 2. File-level search (averaged chunks) ---
+        file_results_avg = search_average_similarity_per_file(
+            user_query=user_input_query,
+            qdrant_client=q_client,
+            collection_name=QDRANT_COLLECTION_NAME,
+            ollama_model_name=ollama_model, 
+            top_n_files=3,
+            normalize_chunks_before_averaging=True
+        )
+        if file_results_avg:
+            print(f"\n--- Top {len(file_results_avg)} SIMILAR FILES (by averaged chunks) for model '{ollama_model}' ---")
+            for i, (filename, score, num_chunks) in enumerate(file_results_avg):
+                print(f"\nFile Result {i+1}:")
+                print(f"  Source File: {filename}")
+                print(f"  Avg. Similarity Score: {score:.4f}")
+                print(f"  (Based on {num_chunks} chunks)")
+        else:
+            print("No similar files found by averaging or an error occurred.")
+    else:
+        print("No query entered. Exiting.")
+
+def plot_writers(ollama_model):
     q_client = QdrantClient(url=QDRANT_CLOUD_URL, api_key=QDRANT_API_KEY, timeout=30)
-    #plot_tsne_of_embeddings(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=5000)
-    #plot_tsne_by_author(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=500)
-    #plot_tsne_of_authors_avg(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=500)  
-    plot_tsne_by_author_allowed(q_client, QDRANT_COLLECTION_NAME, OLLAMA_MODEL_NAME, max_points=500) 
-#     qdrant_client.create_payload_index(
-#     collection_name=QDRANT_COLLECTION_NAME,
-#     field_name="model_name",
-#     field_schema="keyword"
-# )
+    #plot_tsne_of_embeddings(q_client, QDRANT_COLLECTION_NAME, ollama_model, max_points=5000)
+    #plot_tsne_by_author(q_client, QDRANT_COLLECTION_NAME, ollama_model, max_points=500)
+    #plot_tsne_of_authors_avg(q_client, QDRANT_COLLECTION_NAME, ollama_model, max_points=500)  
+    plot_tsne_by_author_allowed(q_client, QDRANT_COLLECTION_NAME, ollama_model, max_points=500) 
+    # qdrant_client.create_payload_index(
+    #     collection_name=QDRANT_COLLECTION_NAME,
+    #     field_name="model_name",
+    #     field_schema="keyword"
+    # )
+
+# --- Main execution logic ---
+options = ["query", "process", "plot"]
+models = {"mistral": "mistral",
+          "bielik": "mwiewior/bielik",
+          "pllum": "antoniprzybylik/llama-pllum:8b"}
+
+if __name__ == "__main__":
+    if QDRANT_CLOUD_URL is None:
+        print("Error: QDRANT_CLOUD_URL environment variable must be set.")
+        exit(1)
+    if QDRANT_API_KEY is None:
+        print("Error: QDRANT_API_KEY environment variable must be set.")
+        exit(1)
+
+    args = sys.argv[1:]
+    if len(args) == 0 or args[1] not in options or args[0] not in models:
+        print("Provide model as first argument and mode as second argument.")
+        print("Available modes:")
+        for opt in options:
+            print(f"  - {opt}")
+        print("Available models:")
+        for model in models.keys():
+            print(f"  - {model}")
+        exit(1)
+    mode = args[1]
+    model = models[args[0]]
+
+    if mode == "process":
+        process_texts(model)
+
+    if mode == "query":
+        if len(args) < 3:
+            print("Provide a query with quotation")
+            exit(1)
+        process_query(args[2], model)
+
+    if mode == "plot":
+        plot_writers(model)
  
