@@ -87,7 +87,7 @@ def get_ollama_embeddings(
 ):  # -> np.ndarray | None:
     try:
         payload = {"model": model_name, "prompt": text}
-        response = requests.post(api_url, json=payload, timeout=60)
+        response = requests.post(api_url, json=payload, timeout=300)
         response.raise_for_status()
         response_json = response.json()
         if "embedding" not in response_json:
@@ -106,8 +106,7 @@ def get_ollama_embeddings(
         return None
 
 
-def check_ollama_status_and_get_dim(model_to_check: str):
-    global VECTOR_DIMENSION
+def check_ollama_status_and_get_dim(model_to_check: str, vector_dimension):
     print(
         f"Checking Ollama status at {OLLAMA_API_BASE_URL} for model '{model_to_check}'..."
     )
@@ -144,10 +143,10 @@ def check_ollama_status_and_get_dim(model_to_check: str):
             and sample_embedding.shape[0] == 1
         ):
             new_dimension = sample_embedding.shape[1]
-            if VECTOR_DIMENSION is not None and VECTOR_DIMENSION != new_dimension:
+            if vector_dimension is not None and vector_dimension != new_dimension:
                 print(
                     f"Warning: The new model '{model_to_check}' (dim: {new_dimension}) has a different dimension "
-                    f"than previously assumed for the collection (dim: {VECTOR_DIMENSION})."
+                    f"than previously assumed for the collection (dim: {vector_dimension})."
                 )
                 print(
                     "If you are using the same Qdrant collection, this will cause issues unless the collection "
@@ -155,9 +154,9 @@ def check_ollama_status_and_get_dim(model_to_check: str):
                 )
                 # Decide on a strategy: exit, use new dim and warn, or require new collection.
                 # For now, we'll proceed but this is a critical point for collection management.
-            VECTOR_DIMENSION = new_dimension
+            vector_dimension = new_dimension
             print(
-                f"Determined vector dimension for '{model_to_check}': {VECTOR_DIMENSION}"
+                f"Determined vector dimension for '{model_to_check}': {vector_dimension}"
             )
         else:
             print(
@@ -170,3 +169,30 @@ def check_ollama_status_and_get_dim(model_to_check: str):
         print(f"Error during Ollama model check for '{model_to_check}': {e}")
         exit(1)
     print("-" * 30)
+
+def check_saved_data(client, qdrant_collection_name):
+    try:
+        collection_info = client.get_collection(
+            collection_name=qdrant_collection_name
+        )
+        print(
+            f"Collection '{qdrant_collection_name}' now has {collection_info.points_count} total points."
+        )
+    except Exception as e:
+        print(f"Could not retrieve final collection info: {e}")
+
+def upsert_batch(client, qdrant_collection_name, points_batch):
+    try:
+        client.upsert(
+            collection_name=qdrant_collection_name,
+            points=points_batch,
+            wait=True,
+        )
+        print(
+            f"    Upserted batch of {len(points_batch)} points to Qdrant."
+        )
+        num_of_points_upserted = len(points_batch)
+        points_batch = []
+        return num_of_points_upserted
+    except Exception as e:
+        print(f"    Error upserting batch to Qdrant: {e}")

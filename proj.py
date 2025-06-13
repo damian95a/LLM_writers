@@ -9,6 +9,8 @@ from LLM_writers.database import (
     check_ollama_status_and_get_dim,
     setup_qdrant_collection,
     get_ollama_embeddings,
+    check_saved_data,
+    upsert_batch,
 )
 from LLM_writers.env import QDRANT_CLOUD_URL, QDRANT_API_KEY, OLLAMA_EMBED_API_URL
 from LLM_writers.plotting import (
@@ -63,10 +65,23 @@ for root, dirs, files in os.walk(DATA_DIR):
             )
             source_texts.append((rel_path, author_folder, file))
 
-VECTOR_DIMENSION = None
+VECTOR_DIMENSION = 4096
 
 
-def do_everything(current_ollama_model_name: str):
+
+def divide_to_chunks(text):
+    words = text.split()
+    chunks = []
+    i = 0
+    while i < len(words):
+        chunk_words = words[i : i + CHUNK_SIZE_WORDS]
+        chunks.append(" ".join(chunk_words))
+        if i + CHUNK_SIZE_WORDS >= len(words):
+            break
+        i += CHUNK_SIZE_WORDS - CHUNK_OVERLAP_WORDS
+    return chunks
+
+def calculate_embeddings_and_store(current_ollama_model_name: str):
     if not QDRANT_CLOUD_URL or not QDRANT_API_KEY:
         print(
             "Error: QDRANT_CLOUD_URL and QDRANT_API_KEY environment variables must be set."
@@ -74,7 +89,7 @@ def do_everything(current_ollama_model_name: str):
         exit(1)
 
     # Check Ollama, determine VECTOR_DIMENSION based on the current_ollama_model_name
-    check_ollama_status_and_get_dim(current_ollama_model_name)
+    check_ollama_status_and_get_dim(current_ollama_model_name, VECTOR_DIMENSION)
     if VECTOR_DIMENSION is None:
         print(
             f"Error: VECTOR_DIMENSION was not set for model {current_ollama_model_name}. Cannot proceed."
@@ -108,15 +123,7 @@ def do_everything(current_ollama_model_name: str):
         with open(filepath, "r", encoding="utf-8") as f:
             text = f.read()
 
-        words = text.split()
-        chunks = []
-        i = 0
-        while i < len(words):
-            chunk_words = words[i : i + CHUNK_SIZE_WORDS]
-            chunks.append(" ".join(chunk_words))
-            if i + CHUNK_SIZE_WORDS >= len(words):
-                break
-            i += CHUNK_SIZE_WORDS - CHUNK_OVERLAP_WORDS
+        chunks = divide_to_chunks(text)
 
         print(f"Generating embeddings for {len(chunks)} chunks...")
 
@@ -154,19 +161,7 @@ def do_everything(current_ollama_model_name: str):
                 points_batch.append(point)
 
                 if len(points_batch) >= QDRANT_BATCH_SIZE:
-                    try:
-                        qdrant_client.upsert(
-                            collection_name=QDRANT_COLLECTION_NAME,
-                            points=points_batch,
-                            wait=True,
-                        )
-                        print(
-                            f"    Upserted batch of {len(points_batch)} points to Qdrant."
-                        )
-                        total_points_upserted_session += len(points_batch)
-                        points_batch = []
-                    except Exception as e:
-                        print(f"    Error upserting batch to Qdrant: {e}")
+                    total_points_upserted_session += upsert_batch(qdrant_client, QDRANT_COLLECTION_NAME, points_batch)
             else:
                 print(f"    Failed to get valid embedding for chunk {idx+1}. Skipping.")
                 if embedding_array_2d is not None:
@@ -175,33 +170,13 @@ def do_everything(current_ollama_model_name: str):
                     )
 
         if points_batch:  # Upsert remaining
-            try:
-                qdrant_client.upsert(
-                    collection_name=QDRANT_COLLECTION_NAME,
-                    points=points_batch,
-                    wait=True,
-                )
-                print(
-                    f"    Upserted final batch of {len(points_batch)} points for {source_text_filename} to Qdrant."
-                )
-                total_points_upserted_session += len(points_batch)
-            except Exception as e:
-                print(
-                    f"    Error upserting final batch for {source_text_filename} to Qdrant: {e}"
-                )
+            print("    Upserting final batch")
+            total_points_upserted_session += upsert_batch(qdrant_client, QDRANT_COLLECTION_NAME, points_batch)
 
     print(
         f"\nFinished processing. Total points upserted in this session for model '{current_ollama_model_name}': {total_points_upserted_session}"
     )
-    try:
-        collection_info = qdrant_client.get_collection(
-            collection_name=QDRANT_COLLECTION_NAME
-        )
-        print(
-            f"Collection '{QDRANT_COLLECTION_NAME}' now has {collection_info.points_count} total points."
-        )
-    except Exception as e:
-        print(f"Could not retrieve final collection info: {e}")
+    check_saved_data(qdrant_client, QDRANT_COLLECTION_NAME)
 
 
 def normalize_vector_np(vec: np.ndarray) -> np.ndarray:
@@ -222,7 +197,7 @@ def process_texts(ollama_model):
     print("Ensure QDRANT_CLOUD_URL, and QDRANT_API_KEY are correctly set.")
     print(f"Embeddings will be stored in Qdrant collection: {QDRANT_COLLECTION_NAME}")
 
-    do_everything(current_ollama_model_name=ollama_model)
+    calculate_embeddings_and_store(current_ollama_model_name=ollama_model)
 
     print("\nProcessing complete.")
 
