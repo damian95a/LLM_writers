@@ -170,3 +170,30 @@ def check_ollama_status_and_get_dim(model_to_check: str):
         print(f"Error during Ollama model check for '{model_to_check}': {e}")
         exit(1)
     print("-" * 30)
+
+def check_saved_data(client, qdrant_collection_name):
+    try:
+        collection_info = client.get_collection(
+            collection_name=qdrant_collection_name
+        )
+        print(
+            f"Collection '{qdrant_collection_name}' now has {collection_info.points_count} total points."
+        )
+    except Exception as e:
+        print(f"Could not retrieve final collection info: {e}")
+
+def upsert_batch(client, qdrant_collection_name, points_batch):
+    try:
+        client.upsert(
+            collection_name=qdrant_collection_name,
+            points=points_batch,
+            wait=True,
+        )
+        print(
+            f"    Upserted batch of {len(points_batch)} points to Qdrant."
+        )
+        num_of_points_upserted = len(points_batch)
+        points_batch = []
+        return num_of_points_upserted
+    except Exception as e:
+        print(f"    Error upserting batch to Qdrant: {e}")
