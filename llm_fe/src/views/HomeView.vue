@@ -1,20 +1,38 @@
 <template>
   <div class="p-4">
-    <div class="flex items-center flex-col mb-10">
-      <h2 class="text-3xl font-semibold mb-4">Select Authors</h2>
-      <div class="grid grid-cols-2 gap-2 mb-4">
-        <div v-for="author in allAuthors" :key="author" class="flex items-center gap-2 text-l">
-          <input
-            :id="author"
-            class="w-5 h-5"
-            type="checkbox"
-            :value="author"
-            v-model="selectedAuthors"
-          />
-          <label :for="author">{{ authorMap[author] }}</label>
+    <div class="flex flex-col items-center mb-10">
+      <div class="flex flex-row gap-20 justify-center">
+        <div class="flex items-center flex-col">
+          <h2 class="text-3xl font-semibold mb-4">Select Authors</h2>
+          <div class="grid grid-cols-2 gap-2 mb-4">
+            <div v-for="author in allAuthors" :key="author" class="flex items-center gap-2 text-l">
+              <input
+                :id="author"
+                class="w-5 h-5"
+                type="checkbox"
+                :value="author"
+                v-model="selectedAuthors"
+              />
+              <label :for="author">{{ authorMap[author] }}</label>
+            </div>
+          </div>
+        </div>
+        <div>
+          <h2 class="text-3xl font-semibold mb-4">Select Model</h2>
+          <div class="grid gap-2 mb-4">
+            <div v-for="model in allModels" :key="model" class="flex items-center gap-2 text-l">
+              <input
+                :id="model"
+                class="w-5 h-5"
+                type="radio"
+                :value="model"
+                v-model="selectedModel"
+              />
+              <label :for="model">{{ modelMap[model] }}</label>
+            </div>
+          </div>
         </div>
       </div>
-
       <div>
         <button @click="fetchTSNE" class="px-4 py-2 bg-blue-500 text-white rounded">
           Fetch Authors Data
@@ -97,14 +115,24 @@ const authorMap = {
   sienkiewicz_henryk: 'Henryk Sienkiewicz',
   skarga_piotr: 'Piotr Skarga',
   słowacki_juliusz: 'Juliusz Słowacki',
+  baczynski_krzysztof_kamil: 'K.K. Baczyński',
+  konopnicka_maria: 'Maria Konopnicka',
 }
+const modelMap = {
+  mistral: 'Mistral',
+  'mwiewior/bielik': 'Bielik',
+  'antoniprzybylik/llama-pllum:8b': 'Pllum',
+}
+const allModels = Object.keys(modelMap)
+const selectedModel = ref(allModels[2])
+
 const fileMap = {
   'faraon-tom-drugi.txt': 'Faraon (Tom II)',
   'krzyzacy-tom-drugi.txt': 'Krzyżacy (Tom II)',
   'ogniem-i-mieczem-tom-drugi.txt': 'Ogniem i Mieczem (Tom II)',
   'lalka-tom-pierwszy.txt': 'Lalka (Tom I)',
   'lalka-tom-drugi.txt': 'Lalka (Tom II)',
-  'skarga-kazania-sejmowe.txt': 'Skarga - Kazania Sejmowe',
+  'skarga-kazania-sejmowe.txt': 'Kazania Sejmowe',
   'quo-vadis.txt': 'Quo Vadis',
   'krzyzacy-tom-pierwszy.txt': 'Krzyżacy (Tom I)',
   'faraon-tom-pierwszy.txt': 'Faraon (Tom I)',
@@ -112,7 +140,7 @@ const fileMap = {
   'ogniem-i-mieczem-tom-pierwszy.txt': 'Ogniem i Mieczem (Tom I)',
   'zemsta.txt': 'Zemsta',
   'balladyna.txt': 'Balladyna',
-  'fredro-sluby-panienskie.txt': 'Fredro - Śluby Panieńskie',
+  'fredro-sluby-panienskie.txt': 'Śluby Panieńskie',
   'pan-tadeusz.txt': 'Pan Tadeusz',
   'pan-wolodyjowski.txt': 'Pan Wołodyjowski',
   'w-pustyni-i-w-puszczy.txt': 'W pustyni i w puszczy',
@@ -123,7 +151,10 @@ const fileMap = {
   'monachomachia.txt': 'Monachomachia',
   'odprawa-poslow-greckich.txt': 'Odprawa posłów greckich',
   'kamizelka.txt': 'Kamizelka',
-  'kochankowski-song-xxv.txt': 'Kochanowski - Song XXV',
+  'kochanowski-song-xxv.txt': 'Kochanowski - Pieśń XXV',
+  'baczynski-ballada-o-rzece.txt': 'Ballada o Rzece',
+  'o-janku-wedrowniczku.txt': 'O Janku Wędrowniczku',
+  'baczynski-pokolenie-do-palcow-przymarzly-struny.txt': 'Pokolenie (Do palców przymarzły struny)',
 }
 
 const allAuthors = Object.keys(authorMap)
@@ -212,8 +243,7 @@ async function fetchTSNE() {
   filteredAuthorsLoading.value = true
   try {
     const params = {
-      // authors: selectedAuthors.value.join(','),
-      // model_name: 'antoniprzybylik/llama-pllum:8b',
+      model_name: selectedModel.value,
     }
 
     if (selectedAuthors.value.length > 0) {
@@ -255,7 +285,7 @@ async function fetchTsneBooks() {
   tsneBooksLoading.value = true
   try {
     const params = {
-      model_name: 'antoniprzybylik/llama-pllum:8b',
+      model_name: selectedModel.value,
     }
 
     const res = await axios.get('http://localhost:8000/api/tsne-books', { params })
@@ -292,7 +322,7 @@ async function fetchTsneAuthorAverage() {
   tsneAuthorAverageLoading.value = true
   try {
     const params = {
-      model_name: 'antoniprzybylik/llama-pllum:8b',
+      model_name: selectedModel.value,
     }
 
     const res = await axios.get('http://localhost:8000/api/author-average-tsne', { params })
